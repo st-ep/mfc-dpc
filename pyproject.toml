@@ -1,0 +1,25 @@
+[project]
+name = "mfe-dpc"
+version = "0.1.0"
+description = "Matryoshka Function Encoder + Differentiable Predictive Control for Van der Pol Oscillator"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0.0",
+    "numpy>=1.24.0",
+    "matplotlib>=3.7.0",
+    "tqdm>=4.65.0",
+]
+
+[project.scripts]
+mfe-dpc = "mfe_dpc:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+]
