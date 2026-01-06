@@ -1,0 +1,21 @@
+seed: 42
+
+dynamics:
+  name: vanderpol
+  mu_range: [0.5, 2.5]
+  test_mus: [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
+
+model:
+  num_basis: 16
+  hidden_dim: 64
+  nesting_dims: [2, 4, 8, 16]
+
+training:
+  fe_epochs: 500
+  dpc_epochs: 1000
+  lr: 0.001
+  weight_decay: 0.0001
+
+evaluation:
+  n_tests: 50
+  horizon: 50

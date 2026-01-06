@@ -1,0 +1,292 @@
+"""Training functions for Function Encoder and DPC."""
+import torch
+import torch.optim as optim
+from typing import List, Dict, Any
+from tqdm import tqdm
+
+from ..models import (
+    FunctionEncoder, MatryoshkaFE, WidthMatryoshkaFE,
+    GroupedHierarchicalFE, DPCPolicy
+)
+from ..dynamics.base import DynamicsBase
+
+
+def train_fe(
+    fe: FunctionEncoder,
+    dynamics: DynamicsBase,
+    config: Dict[str, Any],
+    is_matryoshka: bool = False,
+) -> List[float]:
+    """
+    Train Function Encoder on dynamical system.
+
+    Args:
+        fe: Function Encoder model
+        dynamics: Dynamical system
+        config: Training configuration
+        is_matryoshka: Use nested Matryoshka loss
+
+    Returns:
+        List of training losses
+    """
+    n_epochs = config["training"]["fe_epochs"]
+    lr = config["training"]["lr"]
+    weight_decay = config["training"]["weight_decay"]
+    param_range = tuple(config["dynamics"]["mu_range"])
+
+    optimizer = optim.AdamW(fe.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, n_epochs)
+    losses = []
+
+    name = "MFE" if is_matryoshka else "FE"
+    pbar = tqdm(range(n_epochs), desc=f"Training {name}")
+
+    for epoch in pbar:
+        n_systems, n_samples = 32, 100
+        params = dynamics.sample_params(n_systems, param_range)
+
+        total_loss = 0.0
+        for i in range(n_systems):
+            param = params[i].item()
+            x_train = dynamics.sample_states(n_samples, state_range=(-3, 3))
+            dx_true = dynamics.dx(x_train, torch.tensor(param))
+
+            if is_matryoshka and hasattr(fe, 'nesting_dims'):
+                # Matryoshka nested loss
+                loss = 0.0
+                for k in fe.nesting_dims:
+                    coeffs_k = fe.compute_coefficients(x_train, dx_true, k=k)
+                    dx_pred = fe.predict_dx(x_train, coeffs_k, k=k)
+                    loss = loss + ((dx_pred - dx_true) ** 2).mean()
+                loss = loss / len(fe.nesting_dims)
+            else:
+                coeffs = fe.compute_coefficients(x_train, dx_true)
+                dx_pred = fe.predict_dx(x_train, coeffs)
+                loss = ((dx_pred - dx_true) ** 2).mean()
+
+            total_loss = total_loss + loss
+
+        total_loss = total_loss / n_systems
+        optimizer.zero_grad()
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(fe.parameters(), 1.0)
+        optimizer.step()
+        scheduler.step()
+        losses.append(total_loss.item())
+
+        if epoch % 100 == 0:
+            pbar.set_postfix({'loss': f"{total_loss.item():.4f}"})
+
+    return losses
+
+
+def train_width_matryoshka(
+    fe: WidthMatryoshkaFE,
+    dynamics: DynamicsBase,
+    config: Dict[str, Any],
+) -> List[float]:
+    """
+    Train Width Masking Matryoshka FE with coupled basis-width truncation.
+
+    At each nesting level k, uses width_schedule[k] hidden units.
+    This couples capacity to basis count, forcing coarse-to-fine learning.
+
+    Args:
+        fe: Width Matryoshka Function Encoder
+        dynamics: Dynamical system
+        config: Training configuration
+
+    Returns:
+        List of training losses
+    """
+    n_epochs = config["training"]["fe_epochs"]
+    lr = config["training"]["lr"]
+    weight_decay = config["training"]["weight_decay"]
+    param_range = tuple(config["dynamics"]["mu_range"])
+
+    optimizer = optim.AdamW(fe.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, n_epochs)
+    losses = []
+
+    pbar = tqdm(range(n_epochs), desc="Training WidthMFE")
+
+    for epoch in pbar:
+        n_systems, n_samples = 32, 100
+        params = dynamics.sample_params(n_systems, param_range)
+
+        total_loss = 0.0
+        for i in range(n_systems):
+            param = params[i].item()
+            x_train = dynamics.sample_states(n_samples, state_range=(-3, 3))
+            dx_true = dynamics.dx(x_train, torch.tensor(param))
+
+            # Coupled basis-width Matryoshka loss
+            loss = 0.0
+            for k in fe.nesting_dims:
+                width_k = fe.width_schedule[k]  # Get coupled width
+
+                coeffs_k = fe.compute_coefficients(
+                    x_train, dx_true, k=k, active_width=width_k
+                )
+                dx_pred = fe.predict_dx(
+                    x_train, coeffs_k, k=k, active_width=width_k
+                )
+                loss = loss + ((dx_pred - dx_true) ** 2).mean()
+
+            loss = loss / len(fe.nesting_dims)
+            total_loss = total_loss + loss
+
+        total_loss = total_loss / n_systems
+        optimizer.zero_grad()
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(fe.parameters(), 1.0)
+        optimizer.step()
+        scheduler.step()
+        losses.append(total_loss.item())
+
+        if epoch % 100 == 0:
+            pbar.set_postfix({'loss': f"{total_loss.item():.4f}"})
+
+    return losses
+
+
+def train_grouped_hierarchical(
+    fe: GroupedHierarchicalFE,
+    dynamics: DynamicsBase,
+    config: Dict[str, Any],
+) -> List[float]:
+    """
+    Train Grouped Hierarchical Matryoshka FE with block-level nesting.
+
+    At each nesting level k, uses first k//bases_per_block blocks.
+    Each block is independent (no cascaded features).
+
+    Args:
+        fe: Grouped Hierarchical Function Encoder
+        dynamics: Dynamical system
+        config: Training configuration
+
+    Returns:
+        List of training losses
+    """
+    n_epochs = config["training"]["fe_epochs"]
+    lr = config["training"]["lr"]
+    weight_decay = config["training"]["weight_decay"]
+    param_range = tuple(config["dynamics"]["mu_range"])
+
+    optimizer = optim.AdamW(fe.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, n_epochs)
+    losses = []
+
+    pbar = tqdm(range(n_epochs), desc="Training GMFE")
+
+    for epoch in pbar:
+        n_systems, n_samples = 32, 100
+        params = dynamics.sample_params(n_systems, param_range)
+
+        total_loss = 0.0
+        for i in range(n_systems):
+            param = params[i].item()
+            x_train = dynamics.sample_states(n_samples, state_range=(-3, 3))
+            dx_true = dynamics.dx(x_train, torch.tensor(param))
+
+            # Block-level Matryoshka loss (uniform weighting)
+            loss = 0.0
+            for k in fe.nesting_dims:  # [4, 8, 12, 16]
+                coeffs_k = fe.compute_coefficients(x_train, dx_true, k=k)
+                dx_pred = fe.predict_dx(x_train, coeffs_k, k=k)
+                loss = loss + ((dx_pred - dx_true) ** 2).mean()
+
+            loss = loss / len(fe.nesting_dims)
+            total_loss = total_loss + loss
+
+        total_loss = total_loss / n_systems
+        optimizer.zero_grad()
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(fe.parameters(), 1.0)
+        optimizer.step()
+        scheduler.step()
+        losses.append(total_loss.item())
+
+        if epoch % 100 == 0:
+            pbar.set_postfix({'loss': f"{total_loss.item():.4f}"})
+
+    return losses
+
+
+def train_dpc(
+    fe: FunctionEncoder,
+    policy: DPCPolicy,
+    dynamics: DynamicsBase,
+    config: Dict[str, Any],
+    name: str = "DPC",
+) -> List[float]:
+    """
+    Train DPC policy using Function Encoder for system identification.
+
+    Args:
+        fe: Trained Function Encoder
+        policy: DPC policy to train
+        dynamics: Dynamical system
+        config: Training configuration
+        name: Name for progress bar
+
+    Returns:
+        List of training losses
+    """
+    n_epochs = config["training"]["dpc_epochs"]
+    lr = config["training"]["lr"]
+    weight_decay = config["training"]["weight_decay"]
+    param_range = tuple(config["dynamics"]["mu_range"])
+
+    optimizer = optim.AdamW(policy.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, n_epochs)
+    losses = []
+
+    horizon, n_samples, n_obs = 50, 128, 50
+    pbar = tqdm(range(n_epochs), desc=name)
+
+    for epoch in pbar:
+        # Sample initial conditions and system parameters
+        x0 = dynamics.sample_initial_conditions(n_samples)
+        ref = torch.zeros(n_samples, dynamics.state_dim)
+        params = dynamics.sample_params(n_samples, param_range)
+
+        # Compute FE coefficients for each system
+        coeffs_batch = []
+        for i in range(n_samples):
+            x_obs = dynamics.sample_states(n_obs, state_range=(-3, 3))
+            dx_obs = dynamics.dx(x_obs, params[i:i+1])
+            with torch.no_grad():
+                c = fe.compute_coefficients(x_obs, dx_obs)
+            coeffs_batch.append(c)
+        coeffs = torch.stack(coeffs_batch)
+
+        # Rollout with true dynamics
+        x_traj = [x0]
+        x = x0
+        for t in range(horizon):
+            u = policy(x, ref, coeffs)
+            x = dynamics.rk4_step(x, params.unsqueeze(-1))
+            # Add control input (affects second state component)
+            x = x + 0.05 * torch.cat([torch.zeros_like(u), u], dim=-1)
+            x_traj.append(x)
+
+        x_traj = torch.stack(x_traj, dim=1)
+
+        # DPC loss: tracking + terminal cost
+        tracking = ((x_traj[:, :-1] - ref.unsqueeze(1)) ** 2).mean()
+        terminal = 10.0 * ((x_traj[:, -1] - ref) ** 2).mean()
+        loss = tracking + terminal
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
+        optimizer.step()
+        scheduler.step()
+        losses.append(loss.item())
+
+        if epoch % 100 == 0:
+            pbar.set_postfix({'loss': f"{loss.item():.4f}"})
+
+    return losses

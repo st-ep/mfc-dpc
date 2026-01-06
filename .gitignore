@@ -1,0 +1,9 @@
+# Output logs
+logs/
+
+# Virtual environment
+.mfe_env/
+
+# Python
+__pycache__/
+*.py[cod]
