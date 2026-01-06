@@ -65,6 +65,7 @@ class FunctionEncoder(nn.Module):
         x_obs: torch.Tensor,
         dx_obs: torch.Tensor,
         k: int = None,
+        ridge_alpha: Optional[float] = None,
     ) -> torch.Tensor:
         """
         Compute coefficients via ridge regression.
@@ -73,6 +74,8 @@ class FunctionEncoder(nn.Module):
             x_obs: Observation points [n_obs, state_dim]
             dx_obs: Derivatives at observation points [n_obs, state_dim]
             k: Number of basis functions to use (default: all)
+            ridge_alpha: Weighted ridge growth factor (default: None = uniform)
+                         If provided, uses λ_i = λ * α^i to penalize later bases more
 
         Returns:
             Coefficient vector [num_basis]
@@ -84,8 +87,17 @@ class FunctionEncoder(nn.Module):
         G_flat = G.reshape(n_obs * self.state_dim, k)
         dx_flat = dx_obs.reshape(n_obs * self.state_dim)
 
-        # Ridge regression: (G'G + λI)^-1 G'y
-        GtG = G_flat.T @ G_flat / n_obs + self.ridge_lambda * torch.eye(k, device=G.device)
+        # Ridge regression: (G'G + Reg)^-1 G'y
+        if ridge_alpha is not None and ridge_alpha > 1.0:
+            # Weighted ridge: later bases get more regularization
+            idx = torch.arange(k, device=G.device, dtype=G.dtype)
+            weights = ridge_alpha ** idx
+            Reg = self.ridge_lambda * torch.diag(weights)
+        else:
+            # Standard uniform ridge
+            Reg = self.ridge_lambda * torch.eye(k, device=G.device)
+
+        GtG = G_flat.T @ G_flat / n_obs + Reg
         Gtdx = G_flat.T @ dx_flat / n_obs
         coeffs_k = torch.linalg.solve(GtG, Gtdx)
 
@@ -370,6 +382,7 @@ class GroupedHierarchicalFE(nn.Module):
         x_obs: torch.Tensor,
         dx_obs: torch.Tensor,
         k: Optional[int] = None,
+        ridge_alpha: Optional[float] = None,
     ) -> torch.Tensor:
         """
         Compute coefficients via ridge regression.
@@ -378,6 +391,8 @@ class GroupedHierarchicalFE(nn.Module):
             x_obs: Observation points [n_obs, state_dim]
             dx_obs: Derivatives at observation points [n_obs, state_dim]
             k: Number of basis functions to use (default: all)
+            ridge_alpha: Weighted ridge growth factor (default: None = uniform)
+                         If provided, uses λ_i = λ * α^i to penalize later bases more
 
         Returns:
             Coefficient vector [num_basis]
@@ -391,8 +406,17 @@ class GroupedHierarchicalFE(nn.Module):
         G_flat = G.reshape(n_obs * self.state_dim, k)
         dx_flat = dx_obs.reshape(n_obs * self.state_dim)
 
-        # Ridge regression: (G'G + λI)^-1 G'y
-        GtG = G_flat.T @ G_flat / n_obs + self.ridge_lambda * torch.eye(k, device=G.device)
+        # Ridge regression: (G'G + Reg)^-1 G'y
+        if ridge_alpha is not None and ridge_alpha > 1.0:
+            # Weighted ridge: later bases get more regularization
+            idx = torch.arange(k, device=G.device, dtype=G.dtype)
+            weights = ridge_alpha ** idx
+            Reg = self.ridge_lambda * torch.diag(weights)
+        else:
+            # Standard uniform ridge
+            Reg = self.ridge_lambda * torch.eye(k, device=G.device)
+
+        GtG = G_flat.T @ G_flat / n_obs + Reg
         Gtdx = G_flat.T @ dx_flat / n_obs
         coeffs_k = torch.linalg.solve(GtG, Gtdx)
 
