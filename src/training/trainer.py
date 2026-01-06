@@ -34,6 +34,11 @@ def train_fe(
     weight_decay = config["training"]["weight_decay"]
     param_range = tuple(config["dynamics"]["mu_range"])
 
+    # Meta-style training hyperparameters
+    n_ctx = 50      # Context set size (matches DPC inference)
+    n_tgt = 100     # Target set size (larger for stable gradients)
+    lambda_cons = 0.1  # Coefficient consistency weight
+
     optimizer = optim.AdamW(fe.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, n_epochs)
     losses = []
@@ -42,27 +47,49 @@ def train_fe(
     pbar = tqdm(range(n_epochs), desc=f"Training {name}")
 
     for epoch in pbar:
-        n_systems, n_samples = 32, 100
+        n_systems = 32
         params = dynamics.sample_params(n_systems, param_range)
 
         total_loss = 0.0
         for i in range(n_systems):
-            param = params[i].item()
-            x_train = dynamics.sample_states(n_samples, state_range=(-3, 3))
-            dx_true = dynamics.dx(x_train, torch.tensor(param))
+            mu = torch.tensor(params[i].item())
+
+            # Sample disjoint context and target sets
+            x_ctx = dynamics.sample_states(n_ctx, state_range=(-3, 3))
+            x_tgt = dynamics.sample_states(n_tgt, state_range=(-3, 3))
+            dx_ctx = dynamics.dx(x_ctx, mu)
+            dx_tgt = dynamics.dx(x_tgt, mu)
+
+            # Second context set for coefficient consistency
+            x_ctx2 = dynamics.sample_states(n_ctx, state_range=(-3, 3))
+            dx_ctx2 = dynamics.dx(x_ctx2, mu)
 
             if is_matryoshka and hasattr(fe, 'nesting_dims'):
-                # Matryoshka nested loss
+                # Matryoshka nested loss with context/target split
                 loss = 0.0
                 for k in fe.nesting_dims:
-                    coeffs_k = fe.compute_coefficients(x_train, dx_true, k=k)
-                    dx_pred = fe.predict_dx(x_train, coeffs_k, k=k)
-                    loss = loss + ((dx_pred - dx_true) ** 2).mean()
+                    # Compute coeffs on context, evaluate on target
+                    c1 = fe.compute_coefficients(x_ctx, dx_ctx, k=k)
+                    dx_pred = fe.predict_dx(x_tgt, c1, k=k)
+                    loss_recon = ((dx_pred - dx_tgt) ** 2).mean()
+
+                    # Coefficient consistency via cross-prediction
+                    dx_cross = fe.predict_dx(x_ctx2, c1, k=k)
+                    loss_cons = ((dx_cross - dx_ctx2) ** 2).mean()
+
+                    loss = loss + loss_recon + lambda_cons * loss_cons
                 loss = loss / len(fe.nesting_dims)
             else:
-                coeffs = fe.compute_coefficients(x_train, dx_true)
-                dx_pred = fe.predict_dx(x_train, coeffs)
-                loss = ((dx_pred - dx_true) ** 2).mean()
+                # Standard FE with context/target split
+                c1 = fe.compute_coefficients(x_ctx, dx_ctx)
+                dx_pred = fe.predict_dx(x_tgt, c1)
+                loss_recon = ((dx_pred - dx_tgt) ** 2).mean()
+
+                # Coefficient consistency via cross-prediction
+                dx_cross = fe.predict_dx(x_ctx2, c1)
+                loss_cons = ((dx_cross - dx_ctx2) ** 2).mean()
+
+                loss = loss_recon + lambda_cons * loss_cons
 
             total_loss = total_loss + loss
 
@@ -158,8 +185,10 @@ def train_grouped_hierarchical(
     """
     Train Grouped Hierarchical Matryoshka FE with block-level nesting.
 
-    At each nesting level k, uses first k//bases_per_block blocks.
-    Each block is independent (no cascaded features).
+    Uses meta-style training with context/target split:
+    - Compute coefficients on context set (x_ctx)
+    - Evaluate reconstruction on disjoint target set (x_tgt)
+    - Add coefficient consistency loss via cross-prediction
 
     Args:
         fe: Grouped Hierarchical Function Encoder
@@ -174,6 +203,11 @@ def train_grouped_hierarchical(
     weight_decay = config["training"]["weight_decay"]
     param_range = tuple(config["dynamics"]["mu_range"])
 
+    # Meta-style training hyperparameters
+    n_ctx = 50      # Context set size (matches DPC inference)
+    n_tgt = 100     # Target set size (larger for stable gradients)
+    lambda_cons = 0.1  # Coefficient consistency weight
+
     optimizer = optim.AdamW(fe.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, n_epochs)
     losses = []
@@ -181,21 +215,36 @@ def train_grouped_hierarchical(
     pbar = tqdm(range(n_epochs), desc="Training GMFE")
 
     for epoch in pbar:
-        n_systems, n_samples = 32, 100
+        n_systems = 32
         params = dynamics.sample_params(n_systems, param_range)
 
         total_loss = 0.0
         for i in range(n_systems):
-            param = params[i].item()
-            x_train = dynamics.sample_states(n_samples, state_range=(-3, 3))
-            dx_true = dynamics.dx(x_train, torch.tensor(param))
+            mu = torch.tensor(params[i].item())
 
-            # Block-level Matryoshka loss (uniform weighting)
+            # Sample disjoint context and target sets
+            x_ctx = dynamics.sample_states(n_ctx, state_range=(-3, 3))
+            x_tgt = dynamics.sample_states(n_tgt, state_range=(-3, 3))
+            dx_ctx = dynamics.dx(x_ctx, mu)
+            dx_tgt = dynamics.dx(x_tgt, mu)
+
+            # Second context set for coefficient consistency
+            x_ctx2 = dynamics.sample_states(n_ctx, state_range=(-3, 3))
+            dx_ctx2 = dynamics.dx(x_ctx2, mu)
+
+            # Block-level Matryoshka loss with context/target split
             loss = 0.0
             for k in fe.nesting_dims:  # [4, 8, 12, 16]
-                coeffs_k = fe.compute_coefficients(x_train, dx_true, k=k)
-                dx_pred = fe.predict_dx(x_train, coeffs_k, k=k)
-                loss = loss + ((dx_pred - dx_true) ** 2).mean()
+                # Compute coeffs on context, evaluate on target
+                c1 = fe.compute_coefficients(x_ctx, dx_ctx, k=k)
+                dx_pred = fe.predict_dx(x_tgt, c1, k=k)
+                loss_recon = ((dx_pred - dx_tgt) ** 2).mean()
+
+                # Coefficient consistency via cross-prediction
+                dx_cross = fe.predict_dx(x_ctx2, c1, k=k)
+                loss_cons = ((dx_cross - dx_ctx2) ** 2).mean()
+
+                loss = loss + loss_recon + lambda_cons * loss_cons
 
             loss = loss / len(fe.nesting_dims)
             total_loss = total_loss + loss
