@@ -58,6 +58,62 @@ def evaluate_dpc(
 
 
 @torch.no_grad()
+def evaluate_truncated(
+    fe: FunctionEncoder,
+    policy: DPCPolicy,
+    dynamics: DynamicsBase,
+    param: float,
+    config: Dict[str, Any],
+    k: int,
+) -> np.ndarray:
+    """
+    Evaluate DPC with truncated coefficients (only first k bases).
+
+    Args:
+        fe: Trained Function Encoder
+        policy: Trained DPC policy
+        dynamics: Dynamical system
+        param: System parameter (e.g., mu for Van der Pol)
+        config: Evaluation configuration
+        k: Number of basis functions to use (truncation level)
+
+    Returns:
+        Array of final state errors
+    """
+    n_tests = config["evaluation"]["n_tests"]
+    horizon = config["evaluation"]["horizon"]
+    n_obs = 50
+
+    errors = []
+
+    for _ in range(n_tests):
+        x0 = torch.zeros(1, dynamics.state_dim)
+        x0[0, 0] = torch.rand(1).item() * 4 - 2
+        x0[0, 1] = torch.rand(1).item() * 6 - 3
+        ref = torch.zeros(1, dynamics.state_dim)
+
+        # System identification with truncation
+        x_obs = dynamics.sample_states(n_obs, state_range=(-3, 3))
+        dx_obs = dynamics.dx(x_obs, torch.tensor(param))
+        coeffs = fe.compute_coefficients(x_obs, dx_obs, k=k)
+        # Zero out coefficients beyond k (policy expects full size)
+        coeffs_full = torch.zeros(fe.num_basis)
+        coeffs_full[:k] = coeffs[:k]
+        coeffs = coeffs_full.unsqueeze(0)
+
+        # Rollout with true dynamics
+        x = x0
+        for t in range(horizon):
+            u = policy(x, ref, coeffs)
+            x = dynamics.rk4_step(x, torch.tensor([[param]]))
+            x = x + 0.05 * torch.cat([torch.zeros_like(u), u], dim=-1)
+
+        errors.append(x[0].norm().item())
+
+    return np.array(errors)
+
+
+@torch.no_grad()
 def get_trajectory(
     fe: FunctionEncoder,
     policy: DPCPolicy,

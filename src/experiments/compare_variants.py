@@ -1,18 +1,32 @@
-"""5-way comparison experiment: FE vs MFE × Shared vs Separate + GMFE."""
+"""6-way comparison experiment: FE vs MFE × Shared vs Separate + GFE + GMFE."""
+import random
 import torch
 import numpy as np
 from pathlib import Path
 from typing import Dict, Any, Optional
+
+
+def seed_everything(seed: int) -> None:
+    """Set seeds for full reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 from ..dynamics import VanDerPol
 from ..models import (
     FunctionEncoder, MatryoshkaFE, GroupedHierarchicalFE, DPCPolicy
 )
 from ..training import (
-    train_fe, train_dpc, train_grouped_hierarchical, evaluate_dpc
+    train_fe, train_dpc, train_grouped_hierarchical, train_grouped_fe,
+    evaluate_dpc, evaluate_truncated
 )
 from ..utils.logging import ExperimentLogger
-from ..utils.visualization import plot_results, plot_trajectories
+from ..utils.visualization import plot_results, plot_trajectories, plot_truncation_analysis
 
 
 def get_checkpoint_path(output_dir: str, variant_name: str) -> Path:
@@ -58,7 +72,7 @@ def create_model(
     nesting_dims: list,
 ) -> torch.nn.Module:
     """Create model based on variant type."""
-    if variant_type == "gmfe":
+    if variant_type in ("gmfe", "gfe"):
         # 4 blocks × 4 bases, hidden_dim=128 to match FE-Sep params
         return GroupedHierarchicalFE(
             state_dim=dynamics.state_dim,
@@ -93,6 +107,8 @@ def train_model(
     """Train model based on variant type."""
     if variant_type == "gmfe":
         return train_grouped_hierarchical(model, dynamics, config)
+    elif variant_type == "gfe":
+        return train_grouped_fe(model, dynamics, config)
     elif variant_type == "mfe":
         return train_fe(model, dynamics, config, is_matryoshka=True)
     else:
@@ -110,8 +126,10 @@ def run_comparison(config: Dict[str, Any], config_path: Optional[str] = None) ->
     Returns:
         Results dictionary
     """
-    # Setup
+    # Setup reproducibility
     seed = config["seed"]
+    seed_everything(seed)
+
     logger = ExperimentLogger(config_path)
     logger.log_config(config)
 
@@ -119,12 +137,13 @@ def run_comparison(config: Dict[str, Any], config_path: Optional[str] = None) ->
     print("Matryoshka Function Encoder + DPC")
     print("=" * 70)
     print(f"\nOutput directory: {logger.output_dir}")
-    print("\nComparing 5 variants:")
+    print("\nComparing 6 variants:")
     print("  1. FE-Shared:    Standard FE (shared trunk) + DPC")
     print("  2. FE-Sep:       Standard FE (separate MLPs) + DPC")
     print("  3. MFE-Shared:   Matryoshka FE (shared trunk) + DPC")
     print("  4. MFE-Sep:      Matryoshka FE (separate MLPs) + DPC")
-    print("  5. GMFE:         Grouped Matryoshka FE (independent blocks) + DPC")
+    print("  5. GFE:          Grouped FE (no nesting) + DPC")
+    print("  6. GMFE:         Grouped Matryoshka FE (with nesting) + DPC")
 
     # Initialize dynamics
     dynamics = VanDerPol()
@@ -147,6 +166,7 @@ def run_comparison(config: Dict[str, Any], config_path: Optional[str] = None) ->
         ("fe_sep", "fe", False),
         ("mfe_shared", "mfe", True),
         ("mfe_sep", "mfe", False),
+        ("gfe_grouped", "gfe", False),
         ("gmfe_grouped", "gmfe", False),
     ]
 
@@ -155,6 +175,7 @@ def run_comparison(config: Dict[str, Any], config_path: Optional[str] = None) ->
         "fe_sep": "FE-Sep",
         "mfe_shared": "MFE-Shared",
         "mfe_sep": "MFE-Sep",
+        "gfe_grouped": "GFE",
         "gmfe_grouped": "GMFE",
     }
 
@@ -178,7 +199,9 @@ def run_comparison(config: Dict[str, Any], config_path: Optional[str] = None) ->
         else:
             # Train from scratch
             if variant_type == "gmfe":
-                print(f"Training GMFE + DPC (independent blocks)")
+                print(f"Training GMFE + DPC (grouped blocks, Matryoshka)")
+            elif variant_type == "gfe":
+                print(f"Training GFE + DPC (grouped blocks, no nesting)")
             else:
                 label = "MFE" if variant_type == "mfe" else "FE"
                 trunk = "shared trunk" if shared_trunk else "separate MLPs"
@@ -227,16 +250,19 @@ def run_comparison(config: Dict[str, Any], config_path: Optional[str] = None) ->
 
     # Summary stats
     print("-" * len(header))
-    avgs = {name: np.mean(list(results[name].values())) for name in variant_names}
     ood_threshold = config["dynamics"]["mu_range"][1]
+    # ID Avg: only in-distribution μ values (≤ threshold)
+    avgs = {name: np.mean([results[name][m] for m in test_mus if m <= ood_threshold])
+            for name in variant_names}
+    # OOD Avg: only out-of-distribution μ values (> threshold)
     oods = {name: np.mean([results[name][m] for m in test_mus if m > ood_threshold])
             for name in variant_names}
 
-    best_overall = min(variant_names, key=lambda n: avgs[n])
+    best_id = min(variant_names, key=lambda n: avgs[n])
     best_ood = min(variant_names, key=lambda n: oods[n])
 
-    row = "Overall | " + " | ".join(f"{avgs[n]:.3f}  " for n in variant_names)
-    row += f" | {variant_labels[best_overall]}"
+    row = "ID Avg  | " + " | ".join(f"{avgs[n]:.3f}  " for n in variant_names)
+    row += f" | {variant_labels[best_id]}"
     print(row)
 
     row = "OOD Avg | " + " | ".join(f"{oods[n]:.3f}  " for n in variant_names)
@@ -257,6 +283,26 @@ def run_comparison(config: Dict[str, Any], config_path: Optional[str] = None) ->
     if "mfe_sep" in avgs and "gmfe_grouped" in avgs:
         print(f"GMFE vs MFE-Sep: "
               f"{(avgs['mfe_sep'] - avgs['gmfe_grouped']) / avgs['mfe_sep'] * 100:.1f}% improvement")
+
+    # Truncation analysis
+    print(f"\n=== Truncation Analysis ===")
+    truncation_levels = [10, 12, 14, 16]  # Fine-grained truncation levels
+    truncation_results = {name: {k: {} for k in truncation_levels} for name in variant_names}
+
+    for name in variant_names:
+        print(f"Evaluating {variant_labels[name]} at truncation levels {truncation_levels}...")
+        for k in truncation_levels:
+            for mu in test_mus:
+                errs = evaluate_truncated(
+                    models[name], policies[name], dynamics, mu, config, k
+                )
+                truncation_results[name][k][mu] = errs.mean()
+
+    # Plot truncation analysis
+    plot_truncation_analysis(
+        truncation_results, test_mus, truncation_levels,
+        logger.get_output_path('truncation_analysis.png')
+    )
 
     # Plot results
     plot_results(

@@ -15,6 +15,7 @@ COLORS = {
     'fe_sep': 'cyan',
     'mfe_shared': 'orange',
     'mfe_sep': 'red',
+    'gfe_grouped': 'purple',
     'gmfe_grouped': 'green',
 }
 
@@ -23,6 +24,7 @@ LABELS = {
     'fe_sep': 'FE-Sep',
     'mfe_shared': 'MFE-Shared',
     'mfe_sep': 'MFE-Sep',
+    'gfe_grouped': 'GFE',
     'gmfe_grouped': 'GMFE',
 }
 
@@ -66,7 +68,7 @@ def plot_results(
     # Training curves - DPC
     ax = axes[0, 1]
     for name in variant_names:
-        ax.plot(dpc_losses[name], color=COLORS[name], alpha=0.7, label=LABELS[name])
+        ax.semilogy(dpc_losses[name], color=COLORS[name], alpha=0.7, label=LABELS[name])
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Loss')
     ax.set_title('DPC Training')
@@ -114,7 +116,7 @@ def plot_results(
         ax.grid(True, alpha=0.3)
         ax.set_aspect('equal')
 
-    plt.suptitle('5-Way Comparison: FE vs MFE × Shared/Separate + GMFE\n'
+    plt.suptitle('6-Way Comparison: FE vs MFE × Shared/Separate + GFE + GMFE\n'
                  'Van der Pol Oscillator Control',
                  fontsize=13, fontweight='bold')
     plt.tight_layout()
@@ -176,8 +178,65 @@ def plot_trajectories(
     for idx in range(len(test_mus), len(axes)):
         axes[idx].set_visible(False)
 
-    plt.suptitle('5-Way Trajectory Comparison (100 steps)\n'
+    plt.suptitle('6-Way Trajectory Comparison (100 steps)\n'
                  'Squares = final position', fontsize=13, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    print(f"Saved: {output_path}")
+
+
+# Line styles for truncation levels
+TRUNCATION_STYLES = {
+    10: ':',     # dotted
+    12: '--',    # dashed
+    14: '-.',    # dash-dot
+    16: '-',     # solid
+}
+
+
+def plot_truncation_analysis(
+    truncation_results: Dict[str, Dict[int, Dict[float, float]]],
+    test_mus: List[float],
+    truncation_levels: List[int],
+    output_path: str,
+) -> None:
+    """
+    Plot accuracy vs μ for all variants and truncation levels.
+
+    Args:
+        truncation_results: {variant: {k: {mu: error}}}
+        test_mus: List of μ values
+        truncation_levels: List of truncation levels [2, 4, 8, 16]
+        output_path: Path to save figure
+    """
+    variant_names = list(truncation_results.keys())
+
+    fig, ax = plt.subplots(figsize=(12, 7))
+
+    for name in variant_names:
+        for k in truncation_levels:
+            errors = [truncation_results[name][k][mu] for mu in test_mus]
+            ax.plot(test_mus, errors,
+                    color=COLORS[name],
+                    linestyle=TRUNCATION_STYLES[k],
+                    lw=2, alpha=0.8,
+                    label=f'{LABELS[name]} (k={k})')
+
+    # Mark OOD boundary
+    ax.axvline(x=2.5, color='gray', linestyle='--', lw=1.5, alpha=0.7)
+    ax.text(2.6, ax.get_ylim()[1] * 0.95, 'OOD', fontsize=10, color='gray')
+
+    ax.set_xlabel('μ (system parameter)', fontsize=11)
+    ax.set_ylabel('Final State Error', fontsize=11)
+    ax.set_title('Truncation Analysis: Performance vs μ at Different Basis Counts\n'
+                 'Solid=k=16, Dash-dot=k=14, Dashed=k=12, Dotted=k=10',
+                 fontsize=12, fontweight='bold')
+
+    # Create legend with two columns
+    ax.legend(fontsize=7, loc='upper left', ncol=2)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(bottom=0)
+
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     print(f"Saved: {output_path}")

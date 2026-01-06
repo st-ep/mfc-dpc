@@ -15,10 +15,6 @@ training:
   dpc_epochs: 1000
   lr: 0.001
   weight_decay: 0.0001
-  # Option 2: Diversity regularization for separate MLPs
-  use_diversity_reg: false    # Enable diversity + weighted ridge for Sep MLPs
-  diversity_beta: 0.01        # Diversity penalty weight
-  ridge_alpha: 1.1            # Weighted ridge growth factor
 
 evaluation:
   n_tests: 50
